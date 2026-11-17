@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: pytest -q
+
+  train-and-build:
+    name: Train (quality gate) and build image
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: pip install -e .
+      - name: Generate synthetic sample data
+        run: python scripts/make_sample_data.py --rows 5000 --out data/sample.csv
+      - name: Train with MLflow tracking; fails if MCC is below the gate
+        run: python -m iot_ids.train --config config.yaml --data data/sample.csv --all-features
+      - name: Build serving image
+        run: docker build -t iot-ids-api:${{ github.sha }} .
+      - name: Smoke-test the container
+        run: |
+          docker run -d --name api -p 8000:8000 iot-ids-api:${{ github.sha }}
+          for i in $(seq 1 20); do curl -sf localhost:8000/health && break; sleep 1; done
+          curl -sf localhost:8000/health | grep '"model_loaded":true'
+          curl -sf localhost:8000/model-info
+      - name: Upload model artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-${{ github.sha }}
+          path: models/
